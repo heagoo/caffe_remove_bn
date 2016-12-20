@@ -762,10 +762,162 @@ void Net<Dtype>::CopyTrainedLayersFrom(const NetParameter& param) {
       continue;
     }
     DLOG(INFO) << "Copying source layer " << source_layer_name;
+printf("Layer: %s, %s\n", source_layer_name.c_str(), source_layer.type().c_str());
     vector<shared_ptr<Blob<Dtype> > >& target_blobs =
         layers_[target_layer_id]->blobs();
     CHECK_EQ(target_blobs.size(), source_layer.blobs_size())
         << "Incompatible number of blobs for layer " << source_layer_name;
+    for (int j = 0; j < target_blobs.size(); ++j) {
+      if (!target_blobs[j]->ShapeEquals(source_layer.blobs(j))) {
+        Blob<Dtype> source_blob;
+        const bool kReshape = true;
+        source_blob.FromProto(source_layer.blobs(j), kReshape);
+        LOG(FATAL) << "Cannot copy param " << j << " weights from layer '"
+            << source_layer_name << "'; shape mismatch.  Source param shape is "
+            << source_blob.shape_string() << "; target param shape is "
+            << target_blobs[j]->shape_string() << ". "
+            << "To learn this layer's parameters from scratch rather than "
+            << "copying from a saved net, rename the layer.";
+      }
+printf("\tproto.data_size=%d\n", source_layer.blobs(j).data_size());
+      const bool kReshape = false;
+      target_blobs[j]->FromProto(source_layer.blobs(j), kReshape);
+    }
+  }
+}
+
+template <typename Dtype>
+void Net<Dtype>::CopyTrainedLayersFrom(const string trained_filename) {
+  if (trained_filename.size() >= 3 &&
+      trained_filename.compare(trained_filename.size() - 3, 3, ".h5") == 0) {
+    CopyTrainedLayersFromHDF5(trained_filename);
+  } else {
+    CopyTrainedLayersFromBinaryProto(trained_filename);
+  }
+}
+
+template <typename Dtype>
+static void merge_bn2conv(const BlobProto& proto0, 
+                          const BlobProto& proto1, 
+                          const BlobProto& proto2, 
+                          vector<shared_ptr<Blob<Dtype> > >& target_blobs) {
+  int num = target_blobs[0]->num(); // output channels
+  int channels = target_blobs[0]->channels();
+  int height = target_blobs[0]->height();
+  int width = target_blobs[0]->width();
+  Dtype *blob0 = target_blobs[0]->mutable_cpu_data();
+  Dtype *blob1 = target_blobs[1]->mutable_cpu_data();
+
+  Dtype *mean = new Dtype[num];
+  Dtype *variance = new Dtype[num];
+  const Dtype scale_factor = proto2.data(0) == 0 ? 0 : 1 / proto2.data(0);
+  for (int i = 0; i < num; ++i) {
+    mean[i] = proto0.data(i) * scale_factor;
+    variance[i] = proto1.data(i) * scale_factor;
+    variance[i] += 1e-5; // eps_
+    variance[i] = powf(variance[i], 0.5f);
+  }
+
+  for (int i = 0; i < num; ++i) {
+    for (int j = 0; j < channels * height * width; ++j) {
+      blob0[j] /= variance[i];
+    }
+    blob1[i] = (blob1[i] - mean[i]) / variance[i];
+    blob0 += channels * height * width;
+  }
+
+  delete[] mean;
+  delete[] variance;
+}
+
+template <typename Dtype>
+static void merge_scale2conv(const BlobProto& proto0, 
+                             const BlobProto& proto1, 
+                             vector<shared_ptr<Blob<Dtype> > >& target_blobs) {
+  int num = target_blobs[0]->num(); // output channels
+  int channels = target_blobs[0]->channels();
+  int height = target_blobs[0]->height();
+  int width = target_blobs[0]->width();
+  Dtype *blob0 = target_blobs[0]->mutable_cpu_data();
+  Dtype *blob1 = target_blobs[1]->mutable_cpu_data();
+
+printf("%d, %d\n", proto0.data_size(), proto1.data_size());
+  for (int i = 0; i < num; ++i) {
+    Dtype alpha = proto0.data(i);
+    Dtype beta = proto1.data(i);
+    for (int j = 0; j < channels * height * width; ++j) {
+      blob0[j] *= alpha;
+    }
+    blob1[i] = alpha * blob1[i] + beta;
+    blob0 += channels * height * width;
+  }
+}
+
+template <typename Dtype>
+void Net<Dtype>::TransformTrainedLayersFrom(const NetParameter& param) {
+  int last_conv_id = -1;
+  string last_conv_name;
+
+  int num_source_layers = param.layer_size();
+  for (int i = 0; i < num_source_layers; ++i) {
+    const LayerParameter& source_layer = param.layer(i);
+    const string& source_layer_name = source_layer.name();
+    int target_layer_id = 0;
+
+    bool is_conv_layer = false;
+    if (source_layer.type() == "BatchNorm") {
+      printf("Merge BN layer '%s' to Conv layer '%s'\n", 
+             source_layer_name.c_str(), last_conv_name.c_str());
+      merge_bn2conv(source_layer.blobs(0), 
+                    source_layer.blobs(1), 
+                    source_layer.blobs(2), 
+                    layers_[last_conv_id]->blobs());
+      printf("Merge succeed\n");
+      continue;
+    } else if (source_layer.type() == "Scale") {
+      printf("Merge SC layer '%s' to Conv layer '%s'\n", 
+             source_layer_name.c_str(), last_conv_name.c_str());
+      merge_scale2conv(source_layer.blobs(0), 
+                       source_layer.blobs(1), 
+                       layers_[last_conv_id]->blobs());
+      if (source_layer_name == "scale4a_branch1") {
+        printf("Merge succeed\n");
+      }
+      continue;
+    } else if (source_layer.type() == "Convolution") {
+      is_conv_layer = true;
+      last_conv_name = source_layer_name;
+    }
+
+    while (target_layer_id != layer_names_.size() &&
+        layer_names_[target_layer_id] != source_layer_name) {
+      ++target_layer_id;
+    }
+    if (target_layer_id == layer_names_.size()) {
+      LOG(INFO) << "Ignoring source layer " << source_layer_name;
+      continue;
+    }
+    // Remember the conv layer
+    if (is_conv_layer) {
+      last_conv_id = target_layer_id;
+    }
+
+printf("Copying source layer %s\n", source_layer_name.c_str());
+    DLOG(INFO) << "Copying source layer " << source_layer_name;
+    vector<shared_ptr<Blob<Dtype> > >& target_blobs =
+        layers_[target_layer_id]->blobs();
+    if (target_blobs.size() != source_layer.blobs_size()) {
+      // Convolution layer may not have bias, just set to 0
+      if (is_conv_layer) {
+        target_blobs[0]->FromProto(source_layer.blobs(0), false);
+        memset(target_blobs[1]->mutable_cpu_data(), 0, target_blobs[1]->count() * sizeof(Dtype));
+        continue;
+      } else {
+        printf("Incompatible number of blobs for layer %s\n", source_layer_name.c_str());
+        exit(-1);
+      }
+    }
+
     for (int j = 0; j < target_blobs.size(); ++j) {
       if (!target_blobs[j]->ShapeEquals(source_layer.blobs(j))) {
         Blob<Dtype> source_blob;
@@ -785,13 +937,10 @@ void Net<Dtype>::CopyTrainedLayersFrom(const NetParameter& param) {
 }
 
 template <typename Dtype>
-void Net<Dtype>::CopyTrainedLayersFrom(const string trained_filename) {
-  if (trained_filename.size() >= 3 &&
-      trained_filename.compare(trained_filename.size() - 3, 3, ".h5") == 0) {
-    CopyTrainedLayersFromHDF5(trained_filename);
-  } else {
-    CopyTrainedLayersFromBinaryProto(trained_filename);
-  }
+void Net<Dtype>::TransformTrainedLayersFrom(const string trained_filename) {
+  NetParameter param;
+  ReadNetParamsFromBinaryFileOrDie(trained_filename, &param);
+  TransformTrainedLayersFrom(param);
 }
 
 template <typename Dtype>
