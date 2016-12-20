@@ -6,21 +6,21 @@
 Caffe is a deep learning framework made with expression, speed, and modularity in mind.
 It is developed by the Berkeley Vision and Learning Center ([BVLC](http://bvlc.eecs.berkeley.edu)) and community contributors.
 
-Check out the [project site](http://caffe.berkeleyvision.org) for all the details like
+This repository added a tool named caffe_remove_bn, which is designed to remove the BatchNorm and Scale layer inside the network topologies like ResNet, Inception v3/v4, etc. (Of course, ONLY for inference, as the inference uses the global mean and variance, which can be combined into the convolution layer)
 
-- [DIY Deep Learning for Vision with Caffe](https://docs.google.com/presentation/d/1UeKXVgRvvxg9OUdh_UiC5G71UMscNPlvArsWER41PsU/edit#slide=id.p)
-- [Tutorial Documentation](http://caffe.berkeleyvision.org/tutorial/)
-- [BVLC reference models](http://caffe.berkeleyvision.org/model_zoo.html) and the [community model zoo](https://github.com/BVLC/caffe/wiki/Model-Zoo)
-- [Installation instructions](http://caffe.berkeleyvision.org/installation.html)
+It will take a trained model as input, and output a transformed model.
 
-and step-by-step examples.
+Usage example:
+.build_release/tools/remove_bn_layer.bin ResNet-50-deploy.prototxt ResNet-50-model.caffemodel bn_removed.prototxt bn_removed.caffemodel
 
-[![Join the chat at https://gitter.im/BVLC/caffe](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/BVLC/caffe?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
-
-Please join the [caffe-users group](https://groups.google.com/forum/#!forum/caffe-users) or [gitter chat](https://gitter.im/BVLC/caffe) to ask questions and talk about methods and models.
-Framework development discussions and thorough bug reports are collected on [Issues](https://github.com/BVLC/caffe/issues).
+Please note: Many special cases are not considered in the implementation. Please modifiy the code if needed.
 
 Happy brewing!
+
+## Modifications
+modified:   include/caffe/net.hpp
+modified:   src/caffe/net.cpp
+Added:      tools/remove_bn_layer.cpp
 
 ## License and Citation
 
